@@ -516,18 +516,17 @@ class IRCClient:
  
             if not recipient:
                 return 401
- 
-            if recipient.is_bot_client:
-                if message.startswith(app.settings.COMMAND_PREFIX):
-                    cmd = await commands.process_commands(fro, recipient, message)
-                else:
-                    cmd = None
- 
-                if cmd:
-                    await recipient.send(message, sender=fro)
- 
-                    if cmd["resp"] is not None:
-                        await fro.send_bot(cmd["resp"])
+
+            if message.startswith(app.settings.COMMAND_PREFIX):
+                cmd = await commands.process_commands(fro, recipient, message)
+            else:
+                cmd = None
+
+            if cmd:
+                await recipient.send(message, sender=fro)
+
+                if cmd["resp"] is not None:
+                    await fro.send_bot(cmd["resp"])
             else:
                 await recipient.send(message, fro)
                 log(

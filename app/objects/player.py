@@ -195,9 +195,6 @@ class Player:
     pres_filter: `PresenceFilter`
         The scope of users the client can currently see.
 
-    is_bot_client: `bool`
-        Whether this is a bot account.
-
     is_tourney_client: `bool`
         Whether this is a management/spectator tourney client.
 
@@ -224,7 +221,6 @@ class Player:
         donor_end: int = 0,
         client_details: ClientDetails | None = None,
         login_time: float = 0.0,
-        is_bot_client: bool = False,
         is_tourney_client: bool = False,
         api_key: str | None = None,
         irc_key: str | None = None,
@@ -253,18 +249,10 @@ class Player:
         self.client_details = client_details
         self.login_time = login_time
         self.last_recv_time = login_time
-        self.is_bot_client = is_bot_client
         self.is_tourney_client = is_tourney_client
         self.api_key = api_key
         self.irc_key = irc_key
         self.irc_client = irc_client
-        # avoid enqueuing packets to bot accounts.
-        if self.is_bot_client:
-
-            def _noop_enqueue(data: bytes) -> None:
-                pass
-
-            self.enqueue = _noop_enqueue  # type: ignore[method-assign]
 
         self.away_msg: str | None = None
         self.in_lobby = False

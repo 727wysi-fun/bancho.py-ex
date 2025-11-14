@@ -27,6 +27,7 @@ import bcrypt
 from app.api.v2.common import json
 from app.discord import Embed, Webhook
 import app.metrics
+from app.anticheat.validator import ScoreValidator
 from fastapi import status
 from fastapi.datastructures import FormData
 from fastapi.datastructures import UploadFile
@@ -87,6 +88,8 @@ SCREENSHOTS_PATH = SystemPath.cwd() / ".data/ss"
 
 file_path = "caps.json"
 
+
+
 # Default data
 default_data = {
     "enabled": False,
@@ -115,6 +118,75 @@ def load_json(file_path: str):
 
 capData = load_json(file_path)
 print(capData)
+
+
+async def post_score_webhook(score: Score) -> None:
+    """Post score notification to Discord webhook if it meets the criteria."""
+    # Only post for vanilla STD mode with specific modifications
+    if score.mode not in (GameMode.VANILLA_OSU, GameMode.RELAX_OSU, GameMode.AUTOPILOT_OSU):
+        return
+    
+    # Determine which webhook to use based on mode
+    if score.mode == GameMode.VANILLA_OSU:
+        webhook_url = app.settings.SCORE_WEBHOOKS.get("std_vn", "")
+        min_pp = 150
+    elif score.mode == GameMode.RELAX_OSU:
+        webhook_url = app.settings.SCORE_WEBHOOKS.get("std_rx", "")
+        min_pp = 500
+    elif score.mode == GameMode.AUTOPILOT_OSU:
+        webhook_url = app.settings.SCORE_WEBHOOKS.get("std_ap", "")
+        min_pp = 500
+    else:
+        return
+    
+    # Check if webhook is configured
+    if not webhook_url:
+        return
+    
+    # Check if score meets the pp threshold
+    if score.pp < min_pp:
+        return
+    
+    # Build embed
+    try:
+        # Create beatmap title from individual fields
+        beatmap_title = f"{score.bmap.artist} - {score.bmap.title} [{score.bmap.version}]"
+        
+        embed = Embed(
+            title=f"New score! {score.pp:,.2f}pp",
+            description=f"{score.player.name} achieved {score.pp:,.2f}pp",
+            color=0x7289da,
+        )
+        
+        embed.add_field(
+            name="Beatmap",
+            value=f"[{beatmap_title}](https://{app.settings.DOMAIN}/b/{score.bmap.id})",
+            inline=False
+        )
+        
+        mods_str = f"+{score.mods!r}" if score.mods else "NM"
+        embed.add_field(name="Mods", value=mods_str, inline=True)
+        embed.add_field(name="Accuracy", value=f"{score.acc:.2f}%", inline=True)
+        embed.add_field(name="Combo", value=f"{score.max_combo}x", inline=True)
+        embed.add_field(name="Misses", value=f"{score.nmiss}", inline=True)
+        embed.add_field(name="Score", value=f"{score.score:,}", inline=True)
+        
+        if score.rank:
+            embed.add_field(name="Rank", value=f"#{score.rank}", inline=True)
+        
+        embed.set_thumbnail(url=f"https://a.{app.settings.DOMAIN}/{score.player.id}")
+        embed.set_author(
+            name=score.player.name,
+            url=f"https://{app.settings.DOMAIN}/u/{score.player.id}",
+            icon_url=f"https://a.{app.settings.DOMAIN}/{score.player.id}"
+        )
+        
+        webhook = Webhook(url=webhook_url)
+        webhook.add_embed(embed)
+        
+        await webhook.post()
+    except Exception as e:
+        log(f"Failed to post score webhook: {e}", Ansi.LRED)
 
 
 router = APIRouter(
@@ -898,22 +970,8 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
 
         if score.passed:
             replay_data = await replay_file.read()
-
-            MIN_REPLAY_SIZE = 24
-
-            if len(replay_data) >= MIN_REPLAY_SIZE:
-                replay_disk_file = REPLAYS_PATH / f"{score.id}.osr"
-                replay_disk_file.write_bytes(replay_data)
-            else:
-                log(f"{score.player} submitted a score without a replay!", Ansi.LRED)
-
-                if not score.player.restricted:
-                    await score.player.restrict(
-                        admin=app.state.sessions.bot,
-                        reason="submitted score with no replay",
-                    )
-                    if score.player.is_online:
-                        score.player.logout()
+            replay_disk_file = REPLAYS_PATH / f"{score.id}.osr"
+            replay_disk_file.write_bytes(replay_data)
 
         """ Update the user's & beatmap's stats """
 
@@ -1316,6 +1374,14 @@ async def osuSubmitModularSelector(
         # now we can calculate things based on our data.
         score.acc = score.calculate_accuracy()
 
+        score.time_elapsed = score_time if score.passed else fail_time
+
+        # Все проверки отключены
+        validation_result = await ScoreValidator(score, bmap).validate_all()
+        if score.passed:
+            replay_data = await replay_file.read()
+            await replay_file.seek(0)
+
         osu_file_available = await ensure_osu_file_is_available(
             bmap.id,
             expected_md5=bmap.md5,
@@ -1467,15 +1533,44 @@ async def osuSubmitModularSelector(
                 },
             )
 
+        # Get active daily challenge ID 
+        active_challenge = await app.state.services.database.fetch_one(
+            "SELECT id FROM daily_challenges "
+            "WHERE map_md5 = :map_md5 AND mode = :mode "
+            "AND start_time <= NOW() AND end_time > NOW() "
+            "AND active = 1 "
+            "ORDER BY start_time DESC LIMIT 1",
+            {"map_md5": score.bmap.md5, "mode": score.mode},
+        )
+
+        # Check if this is the best score for daily challenge
+        if active_challenge:
+            best_score = await app.state.services.database.fetch_one(
+                "SELECT id FROM scores "
+                "WHERE daily_challenge_id = :daily_challenge_id "
+                "AND userid = :user_id AND mode = :mode "
+                "AND status = 2",
+                {
+                    "daily_challenge_id": active_challenge["id"],
+                    "user_id": score.player.id,
+                    "mode": score.mode,
+                },
+            )
+            
+            if best_score is None and score.passed:
+                score.status = 2  # Mark as best score
+
         score.id = await app.state.services.database.execute(
-            "INSERT INTO scores "
-            "VALUES (NULL, "
-            ":map_md5, :score, :pp, :acc, "
-            ":max_combo, :mods, :n300, :n100, "
-            ":n50, :nmiss, :ngeki, :nkatu, "
-            ":grade, :status, :mode, :play_time, "
+            "INSERT INTO scores (map_md5, score, pp, acc, "
+            "max_combo, mods, n300, n100, n50, nmiss, "
+            "ngeki, nkatu, grade, status, mode, play_time, "
+            "time_elapsed, client_flags, userid, perfect, online_checksum, "
+            "daily_challenge_id) "
+            "VALUES (:map_md5, :score, :pp, :acc, "
+            ":max_combo, :mods, :n300, :n100, :n50, :nmiss, "
+            ":ngeki, :nkatu, :grade, :status, :mode, :play_time, "
             ":time_elapsed, :client_flags, :user_id, :perfect, "
-            ":checksum)",
+            ":checksum, :daily_challenge_id)",
             {
                 "map_md5": score.bmap.md5,
                 "score": score.score,
@@ -1498,6 +1593,7 @@ async def osuSubmitModularSelector(
                 "user_id": score.player.id,
                 "perfect": score.perfect,
                 "checksum": score.client_checksum,
+                "daily_challenge_id": active_challenge["id"] if active_challenge else None,
             },
         )
 
@@ -1506,22 +1602,8 @@ async def osuSubmitModularSelector(
         
     if score.passed:
         replay_data = await replay_file.read()
-
-        MIN_REPLAY_SIZE = 24
-
-        if len(replay_data) >= MIN_REPLAY_SIZE:
-            replay_disk_file = REPLAYS_PATH / f"{score.id}.osr"
-            replay_disk_file.write_bytes(replay_data)
-        else:
-            log(f"{score.player} submitted a score without a replay!", Ansi.LRED)
-
-            if not score.player.restricted:
-                await score.player.restrict(
-                    admin=app.state.sessions.bot,
-                    reason="submitted score with no replay",
-                )
-                if score.player.is_online:
-                    score.player.logout()
+        replay_disk_file = REPLAYS_PATH / f"{score.id}.osr"
+        replay_disk_file.write_bytes(replay_data)
 
     """ Update the user's & beatmap's stats """
 
@@ -1743,6 +1825,10 @@ async def osuSubmitModularSelector(
         ]
 
         response = "|".join(submission_charts).encode()
+
+    # Post score notification to Discord webhook if it meets criteria
+    if score.passed and score.status == SubmissionStatus.BEST:
+        asyncio.create_task(post_score_webhook(score))
 
     log(
         f"[{score.mode!r}] {score.player} submitted a score! "

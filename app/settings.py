@@ -34,6 +34,17 @@ FIRST_PLACES_WEBHOOK = os.environ["FIRST_PLACES_WEBHOOK"]
 ENABLE_FIRST_PLACES_WEBHOOK = read_bool(os.environ["ENABLE_FIRST_PLACES_WEBHOOK"])
 DISCORD_URL = os.environ["DISCORD_URL"]
 SERVER_NAME = os.environ["SERVER_NAME"]
+VOTIFIER_API_URL = os.environ.get("VOTIFIER_API_URL", "http://localhost:5001")
+
+# Score webhooks
+SCORE_WEBHOOKS = {
+    "std_vn": os.environ.get("SCORE_WEBHOOK_STD_VN", ""),
+    "std_rx": os.environ.get("SCORE_WEBHOOK_STD_RX", ""),
+    "std_ap": os.environ.get("SCORE_WEBHOOK_STD_AP", ""),
+}
+
+# Map status change webhook
+MAP_STATUS_WEBHOOK = os.environ.get("MAP_STATUS_WEBHOOK", "")
 
 DISALLOW_INGAME_RESTRICTION = read_bool(os.environ["DISALLOW_INGAME_RESTRICTION"])
 DISALLOW_INGAME_REGISTRATION = read_bool(os.environ["DISALLOW_INGAME_REGISTRATION"])

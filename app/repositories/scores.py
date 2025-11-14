@@ -47,6 +47,7 @@ class ScoresTable(Base):
     userid = Column("userid", Integer, nullable=False)
     perfect = Column("perfect", TINYINT(1), nullable=False)
     online_checksum = Column("online_checksum", String(32), nullable=False)
+    daily_challenge_id = Column("daily_challenge_id", Integer, nullable=True)
 
     __table_args__ = (
         Index("scores_map_md5_index", map_md5),
@@ -84,6 +85,7 @@ READ_PARAMS = (
     ScoresTable.userid,
     ScoresTable.perfect,
     ScoresTable.online_checksum,
+    ScoresTable.daily_challenge_id,
 )
 
 
@@ -110,6 +112,7 @@ class Score(TypedDict):
     userid: int
     perfect: int
     online_checksum: str
+    daily_challenge_id: int | None
 
 
 async def create(
@@ -157,6 +160,7 @@ async def create(
         userid=user_id,
         perfect=perfect,
         online_checksum=online_checksum,
+        daily_challenge_id=None,  # Will be updated after checking daily challenge
     )
     rec_id = await app.state.services.database.execute(insert_stmt)
 

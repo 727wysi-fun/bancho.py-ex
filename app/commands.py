@@ -996,7 +996,7 @@ async def user(ctx: Context) -> str | None:
 
     return "\n".join(
         (
-            f'[{"Bot" if player.is_bot_client else "Player"}] {display_name} ({player.id})',
+            f'[Player] {display_name} ({player.id})',
             f"Privileges: {priv_list}",
             f"Donator: {donator_info}",
             f"Channels: {[c.real_name for c in player.channels]}",

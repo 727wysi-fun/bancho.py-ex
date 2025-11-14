@@ -95,7 +95,7 @@ async def bancho_http_handler() -> Response:
     """Handle a request from a web browser."""
     new_line = "\n"
     matches = [m for m in app.state.sessions.matches if m is not None]
-    players = [p for p in app.state.sessions.players if not p.is_bot_client]
+    players = list(app.state.sessions.players)
 
     packets = app.state.packets["all"]
 
@@ -121,13 +121,7 @@ async def bancho_view_online_users() -> Response:
     """see who's online"""
     new_line = "\n"
 
-    players: list[Player] = []
-    bots: list[Player] = []
-    for p in app.state.sessions.players:
-        if p.is_bot_client:
-            bots.append(p)
-        else:
-            players.append(p)
+    players: list[Player] = list(app.state.sessions.players)
 
     id_max_length = len(str(max(p.id for p in app.state.sessions.players)))
 
@@ -137,8 +131,6 @@ async def bancho_view_online_users() -> Response:
 <body style="font-family: monospace;  white-space: pre-wrap;"><a href="/">back</a>
 users:
 {new_line.join([f"({p.id:>{id_max_length}}): {p.safe_name}" for p in players])}
-bots:
-{new_line.join(f"({p.id:>{id_max_length}}): {p.safe_name}" for p in bots)}
 </body>
 </html>""",
     )
@@ -945,14 +937,8 @@ async def handle_osu_login_request(
 
             # enqueue them to us.
             if not o.restricted:
-                if o is app.state.sessions.bot:
-                    # optimization for bot since it's
-                    # the most frequently requested user
-                    data += app.packets.bot_presence(o)
-                    data += app.packets.bot_stats(o)
-                else:
-                    data += app.packets.user_presence(o)
-                    data += app.packets.user_stats(o)
+                data += app.packets.user_presence(o)
+                data += app.packets.user_stats(o)
 
         # the player may have been sent mail while offline,
         # enqueue any messages from their respective authors.
@@ -1012,14 +998,8 @@ async def handle_osu_login_request(
         # player is restricted, one way data
         for o in app.state.sessions.players.unrestricted:
             # enqueue them to us.
-            if o is app.state.sessions.bot:
-                # optimization for bot since it's
-                # the most frequently requested user
-                data += app.packets.bot_presence(o)
-                data += app.packets.bot_stats(o)
-            else:
-                data += app.packets.user_presence(o)
-                data += app.packets.user_stats(o)
+            data += app.packets.user_presence(o)
+            data += app.packets.user_stats(o)
 
         data += app.packets.account_restricted()
         data += app.packets.send_message(
@@ -2202,13 +2182,7 @@ class UserPresenceRequest(BasePacket):
         for pid in self.user_ids:
             target = app.state.sessions.players.get(id=pid)
             if target:
-                if target is app.state.sessions.bot:
-                    # optimization for bot since it's
-                    # the most frequently requested user
-                    packet = app.packets.bot_presence(target)
-                else:
-                    packet = app.packets.user_presence(target)
-
+                packet = app.packets.user_presence(target)
                 player.enqueue(packet)
 
 

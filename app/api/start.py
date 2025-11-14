@@ -15,6 +15,7 @@ async def start_pubsub_recievers():
     log("Starting pubsub recievers-ex...", Ansi.LGREEN)
     
     asyncio.create_task(channel_rank_receiver())
+    asyncio.create_task(channel_map_status_receiver())
     asyncio.create_task(channel_restrict_reciever())
     asyncio.create_task(channel_unrestrict_reciever())
     asyncio.create_task(channel_alert_all_reciever())
@@ -122,6 +123,32 @@ async def channel_rank_receiver():
     finally:
         await pubsub.unsubscribe("rank")
         log("Unsubscribed from 'rank'.", Ansi.LRED)
+
+async def channel_map_status_receiver():
+    pubsub = app.state.services.redis.pubsub()
+    await pubsub.subscribe("ex:map_status_change")
+
+    log("Subscribed to 'ex:map_status_change' channel.", Ansi.LGREEN)
+
+    try:
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                data = orjson.loads(message["data"])
+                
+                map_ids = data.get("map_ids", [])
+                ranktype = data.get("ranktype", "map")
+                rank_type = data.get("type", "rank")
+                
+                log(f"Received message on 'ex:map_status_change'", Ansi.LBLUE)
+                log(f"EX | Map Status | Map IDs: {map_ids}, Rank Type: {rank_type}, Type: {ranktype}", Ansi.LBLUE)
+                
+                # Send webhook notification
+                await post_map_status_webhook(map_ids, ranktype, rank_type)
+    except asyncio.CancelledError:
+        log("Channel map_status_change receiver task cancelled.", Ansi.LYELLOW)
+    finally:
+        await pubsub.unsubscribe("ex:map_status_change")
+        log("Unsubscribed from 'ex:map_status_change'.", Ansi.LRED)
 
 async def channel_restrict_reciever():
     pubsub = app.state.services.redis.pubsub()
@@ -267,4 +294,58 @@ async def channel_removepriv_reciever():
     finally:
         await pubsub.unsubscribe("removepriv")
         log("Unsubscribed from 'removepriv'.", Ansi.LRED)
+
+
+async def post_map_status_webhook(map_ids: list[int], ranktype: str, rank_type: str) -> None:
+    """Post map status change notification to Discord webhook."""
+    from app.objects.beatmap import Beatmap, RankedStatus
+    from app.discord import Embed, Webhook
+    
+    webhook_url = app.settings.MAP_STATUS_WEBHOOK
+    if not webhook_url:
+        return
+    
+    try:
+        # Map status type to string
+        status_map = {
+            "unrank": "Unranked",
+            "rank": "Ranked",
+            "love": "Loved"
+        }
+        status_str = status_map.get(rank_type, "Unknown")
+        
+        # Get beatmap info
+        beatmap = await Beatmap.from_bid(map_ids[0]) if map_ids else None
+        if not beatmap:
+            return
+        
+        # Create embed
+        beatmap_title = f"{beatmap.artist} - {beatmap.title} [{beatmap.version}]"
+        
+        embed = Embed(
+            title=f"Map Status Changed to {status_str}",
+            description=f"{beatmap_title}",
+            color=0x9c27b0,
+        )
+        
+        embed.add_field(
+            name="Beatmap",
+            value=f"[{beatmap_title}](https://{app.settings.DOMAIN}/b/{beatmap.id})",
+            inline=False
+        )
+        
+        embed.add_field(name="New Status", value=status_str, inline=True)
+        embed.add_field(name="Type", value=ranktype.capitalize(), inline=True)
+        embed.add_field(name="Creator", value=beatmap.creator, inline=True)
+        
+        # Add thumbnail
+        embed.set_thumbnail(url=f"https://assets.ppy.sh/beatmaps/{beatmap.set_id}/covers/cover.jpg")
+        
+        webhook = Webhook(url=webhook_url)
+        webhook.add_embed(embed)
+        
+        await webhook.post()
+    except Exception as e:
+        log(f"Failed to post map status webhook: {e}", Ansi.LRED)
+
 

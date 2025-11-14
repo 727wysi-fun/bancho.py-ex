@@ -4,18 +4,22 @@ from collections.abc import Iterable
 from collections.abc import Iterator
 from collections.abc import Sequence
 from typing import Any
+import random
+import time
 
 import databases.core
 
 import app.settings
 import app.state
 import app.utils
+from app.constants.gamemodes import GameMode
 from app.constants.privileges import ClanPrivileges
 from app.constants.privileges import Privileges
 from app.logging import Ansi
 from app.logging import log
 from app.objects.channel import Channel
 from app.objects.match import Match
+from app.objects.player import Action
 from app.objects.player import Player
 from app.repositories import channels as channels_repo
 from app.repositories import clans as clans_repo
@@ -291,6 +295,47 @@ class Players(list[Player]):
         super().remove(player)
 
 
+async def _initialize_leaderboards() -> None:
+    """Initialize leaderboards in redis from database statistics."""
+    log("Initializing leaderboards in redis.", Ansi.LCYAN)
+    
+    # fetch all unrestricted users with their stats
+    all_stats = await app.state.services.database.fetch_all(
+        """
+        SELECT s.id, s.mode, s.pp, u.country, u.priv
+        FROM stats s
+        INNER JOIN users u ON s.id = u.id
+        WHERE s.pp > 0 AND (u.priv & :unrestricted) = :unrestricted
+        """,
+        {"unrestricted": Privileges.UNRESTRICTED.value},
+    )
+    
+    leaderboard_counts = {}
+    
+    for stat in all_stats:
+        mode = stat["mode"]
+        user_id = str(stat["id"])
+        pp = stat["pp"]
+        country = stat["country"]
+        
+        # add to global leaderboard
+        await app.state.services.redis.zadd(
+            f"bancho:leaderboard:{mode}",
+            {user_id: pp},
+        )
+        
+        # add to country leaderboard
+        await app.state.services.redis.zadd(
+            f"bancho:leaderboard:{mode}:{country}",
+            {user_id: pp},
+        )
+        
+        leaderboard_counts[mode] = leaderboard_counts.get(mode, 0) + 1
+    
+    for mode, count in leaderboard_counts.items():
+        log(f"Initialized leaderboard for mode {mode} with {count} players.", Ansi.LGREEN)
+
+
 async def initialize_ram_caches() -> None:
     """Setup & cache the global collections before listening for connections."""
     # fetch channels, clans and pools from db
@@ -308,7 +353,6 @@ async def initialize_ram_caches() -> None:
         pw_bcrypt=None,
         token=Player.generate_token(),
         login_time=float(0x7FFFFFFF),  # (never auto-dc)
-        is_bot_client=True,
     )
     app.state.sessions.players.append(app.state.sessions.bot)
 
@@ -319,3 +363,6 @@ async def initialize_ram_caches() -> None:
             "SELECT id, api_key FROM users WHERE api_key IS NOT NULL",
         )
     }
+
+    # initialize leaderboards in redis from database
+    await _initialize_leaderboards()

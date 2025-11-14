@@ -1127,25 +1127,6 @@ def match_player_skipped(user_id: int) -> bytes:
     return write(ServerPackets.MATCH_PLAYER_SKIPPED, (user_id, osuTypes.i32))
 
 
-# since the bot is always online and is
-# also automatically added to all player's
-# friends list, their presence is requested
-# *very* frequently; only build it once.
-@cache
-def bot_presence(player: Player) -> bytes:
-    return write(
-        ServerPackets.USER_PRESENCE,
-        (player.id, osuTypes.i32),
-        (player.name, osuTypes.string),
-        (-5 + 24, osuTypes.u8),
-        (245, osuTypes.u8),  # satellite provider
-        (31, osuTypes.u8),
-        (1234.0, osuTypes.f32),  # send coordinates waaay
-        (4321.0, osuTypes.f32),  # off the map for the bot
-        (0, osuTypes.i32),
-    )
-
-
 # packet id: 83
 def _user_presence(
     user_id: int,

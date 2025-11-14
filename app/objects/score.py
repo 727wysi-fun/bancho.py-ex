@@ -8,7 +8,7 @@ from enum import unique
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from app.api.v2.common import json
+from app.api.v2.common import json # Common JSON handling for the application
 import app.state
 import app.usecases.performance
 import app.utils
@@ -121,14 +121,16 @@ class Score:
         self.bmap: Beatmap | None = None
         self.player: Player | None = None
 
+        # Основные атрибуты
         self.mode: GameMode
-        self.mods: Mods
+        self.mods: Mods = Mods.NOMOD
 
-        self.pp: float
-        self.sr: float
-        self.score: int
-        self.max_combo: int
-        self.acc: float
+        # Параметры производительности и точности
+        self.pp: float = 0.0
+        self.sr: float = 0.0
+        self.score: int = 0
+        self.max_combo: int = 0
+        self.acc: float = 0.0
 
         # TODO: perhaps abstract these differently
         # since they're mode dependant? feels weird..
@@ -157,42 +159,80 @@ class Score:
 
     def toJSON(self) -> str:
         """Convert Score object to JSON string with primitive values."""
-        data = {
-            'id': self.id,
-            'mode': self.mode.value if hasattr(self.mode, 'value') else str(self.mode),
-            'mods': self.mods.value if hasattr(self.mods, 'value') else str(self.mods),
-            'pp': self.pp,
-            'sr': self.sr,
-            'score': self.score,
-            'max_combo': self.max_combo,
-            'acc': self.acc,
-            'n300': self.n300,
-            'n100': self.n100,
-            'n50': self.n50,
-            'nmiss': self.nmiss,
-            'ngeki': self.ngeki,
-            'nkatu': self.nkatu,
-            'grade': self.grade.value if hasattr(self.grade, 'value') else str(self.grade),
-            'passed': self.passed,
-            'perfect': self.perfect,
-            'status': self.status.value if hasattr(self.status, 'value') else str(self.status),
-            'client_time': self.client_time.isoformat() if self.client_time else None,
-            'server_time': self.server_time.isoformat() if self.server_time else None,
-            'time_elapsed': self.time_elapsed,
-            'client_flags': self.client_flags.value if hasattr(self.client_flags, 'value') else str(self.client_flags),
-            'client_checksum': self.client_checksum,
-            'rank': self.rank
-        }
+        data = {}
 
-        # Only include beatmap id if available
+        # Handle core fields
+        data['id'] = self.id if hasattr(self, 'id') else None
+        data['mode'] = self.mode.value if hasattr(self.mode, 'value') else str(self.mode) if hasattr(self, 'mode') else None
+        data['mods'] = self.mods.value if hasattr(self.mods, 'value') else str(self.mods) if hasattr(self, 'mods') else None
+        
+        # Performance & accuracy fields with safe defaults
+        try:
+            data['pp'] = float(self.pp)
+        except (AttributeError, ValueError, TypeError):
+            data['pp'] = 0.0
+            
+        try:
+            data['sr'] = float(self.sr)
+        except (AttributeError, ValueError, TypeError):
+            data['sr'] = 0.0
+            
+        try:
+            data['score'] = int(self.score)
+        except (AttributeError, ValueError, TypeError):
+            data['score'] = 0
+            
+        try:
+            data['max_combo'] = int(self.max_combo)
+        except (AttributeError, ValueError, TypeError):
+            data['max_combo'] = 0
+            
+        try:
+            data['acc'] = float(self.acc)
+        except (AttributeError, ValueError, TypeError):
+            data['acc'] = 0.0
+        
+        # Score stats
+        data['n300'] = self.n300
+        data['n100'] = self.n100
+        data['n50'] = self.n50
+        data['nmiss'] = self.nmiss
+        data['ngeki'] = self.ngeki
+        data['nkatu'] = self.nkatu
+        
+        # Additional attributes
+        data['grade'] = self.grade.value if hasattr(self.grade, 'value') else str(self.grade)
+        data['passed'] = bool(self.passed)
+        data['perfect'] = bool(self.perfect)
+        data['status'] = self.status.value if hasattr(self.status, 'value') else str(self.status)
+        
+        # Time fields
+        data['client_time'] = self.client_time.isoformat() if self.client_time else None
+        data['server_time'] = self.server_time.isoformat() if self.server_time else None
+        data['time_elapsed'] = self.time_elapsed
+        
+        # Client data
+        data['client_flags'] = self.client_flags.value if hasattr(self.client_flags, 'value') else str(self.client_flags)
+        data['client_checksum'] = self.client_checksum
+        data['rank'] = self.rank
+
+        # Optional relations
         if self.bmap:
             data['beatmap_id'] = self.bmap.id if hasattr(self.bmap, 'id') else None
 
-        # Only include player id if available
         if self.player:
             data['player_id'] = self.player.id if hasattr(self.player, 'id') else None
 
-        return json.dumps(data)
+        try:
+            return json.dumps(data)
+        except Exception as e:
+            print(f"JSON serialization error: {e}")
+            print(f"Data attempting to serialize: {data}")
+            # Return a minimal valid JSON object if serialization fails
+            return json.dumps({
+                "id": self.id,
+                "error": "Failed to serialize full score data"
+            })
 
     def __repr__(self) -> str:
         # TODO: i really need to clean up my reprs
@@ -290,6 +330,9 @@ class Score:
         s.client_time = datetime.strptime(data[14], "%y%m%d%H%M%S")
         s.client_flags = ClientFlags(data[15].count(" ") & ~4)
 
+        # Initialize the score status - will be recalculated later if passed
+        s.status = SubmissionStatus.FAILED if not s.passed else SubmissionStatus.SUBMITTED
+
         s.server_time = datetime.now()
 
         return s
@@ -376,8 +419,27 @@ class Score:
             osu_file_path=str(BEATMAPS_PATH / f"{beatmap_id}.osu"),
             scores=[score_args],
         )
-
-        return result[0]["performance"]["pp"], result[0]["difficulty"]["stars"]
+        
+        base_pp = result[0]["performance"]["pp"]
+        stars = result[0]["difficulty"]["stars"]
+        
+        # Применяем RX модификаторы только для режима Relax
+        if self.mode >= GameMode.RELAX_OSU:
+            assert self.bmap is not None
+            from app.usecases.rx_performance import calculate_rx_performance
+            
+            pp = calculate_rx_performance(
+                base_pp=base_pp,
+                max_combo=self.max_combo,
+                map_max_combo=self.bmap.max_combo,
+                stars=stars,
+                aim_stars=result[0]["difficulty"]["aim"],
+                speed_stars=result[0]["difficulty"]["speed"],
+                nmiss=self.nmiss
+            )
+            return pp, stars
+            
+        return base_pp, stars
 
     async def calculate_status(self) -> None:
         """Calculate the submission status of a submitted score."""

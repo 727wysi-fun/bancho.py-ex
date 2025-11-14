@@ -58,10 +58,46 @@ async def api_get_beatmaps(**params: Any) -> BeatmapApiResponse:
         # https://osu.direct/doc
         url = "https://osu.direct/api/get_beatmaps"
 
-    response = await app.state.services.http_client.get(url, params=params)
-    response_data = response.json()
-    if response.status_code == 200 and response_data:  # (data may be [])
-        return {"data": response_data, "status_code": response.status_code}
+    try:
+        # Делаем запрос
+        response = await app.state.services.http_client.get(url, params=params)
+        
+        # Проверяем код ответа
+        if response.status_code != 200:
+            if app.settings.DEBUG:
+                log(f"API вернул код {response.status_code}", Ansi.LRED)
+            return {"data": None, "status_code": response.status_code}
+
+        # Проверяем наличие контента
+        if not response.content:
+            if app.settings.DEBUG:
+                log("API вернул пустой ответ", Ansi.LRED) 
+            return {"data": None, "status_code": response.status_code}
+
+        # Пробуем распарсить JSON
+        try:
+            response_data = response.json()
+            if response_data:  # (может быть пустым списком [])
+                return {"data": response_data, "status_code": response.status_code}
+        except Exception as e:
+            if app.settings.DEBUG:
+                log(f"Ошибка парсинга JSON: {e}", Ansi.LRED)
+                log(f"Содержимое ответа: {response.content[:200]}...", Ansi.LRED)
+            return {"data": None, "status_code": response.status_code}
+
+    except Exception as e:
+        if app.settings.DEBUG:
+            log(f"Ошибка при запросе к API: {e}", Ansi.LRED)
+        return {"data": None, "status_code": 500}
+        
+    try:
+        # Try to parse JSON response
+        response_data = response.json()
+        if response_data:  # (data may be [])
+            return {"data": response_data, "status_code": response.status_code}
+    except Exception as e:
+        if app.settings.DEBUG:
+            log(f"Failed to parse osu! api response: {e}", Ansi.LRED)
 
     return {"data": None, "status_code": response.status_code}
 
