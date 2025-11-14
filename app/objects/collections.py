@@ -295,6 +295,82 @@ class Players(list[Player]):
         super().remove(player)
 
 
+async def _load_simulation_bots() -> None:
+    """Load simulation bots from database and add them to online players."""
+    log("Loading simulation bots.", Ansi.LCYAN)
+    
+    # Fetch all bot users - these are the realistic names we generated
+    # Using email pattern to identify bots (all have @bots.local)
+    bot_users = await app.state.services.database.fetch_all(
+        """
+        SELECT id, name, country FROM users 
+        WHERE email LIKE '%@bots.local'
+        ORDER BY id
+        """
+    )
+    
+    if not bot_users:
+        log("No simulation bots found in database.", Ansi.LYELLOW)
+        return
+    
+    # Bot action types for variety
+    bot_actions = [
+        Action.Idle,      # 0
+        Action.Afk,       # 1
+        Action.Playing,   # 2
+        Action.Editing,   # 3
+        Action.Modding,   # 4
+        Action.Lobby,     # 11
+        Action.Watching,  # 6
+    ]
+    
+    for bot_user in bot_users:
+        # Create geolocation for the bot
+        geoloc = {
+            "latitude": random.uniform(-90, 90),
+            "longitude": random.uniform(-180, 180),
+            "country": {"acronym": bot_user["country"].lower(), "numeric": 0},
+        }
+        
+        # Create Player object for the bot
+        bot_player = Player(
+            id=bot_user["id"],
+            name=bot_user["name"],
+            priv=Privileges.UNRESTRICTED,
+            pw_bcrypt=None,
+            token=Player.generate_token(),
+            geoloc=geoloc,
+            login_time=float(0x7FFFFFFF),  # never auto-dc
+            is_bot_client=True,
+        )
+        
+        # Load stats for the bot
+        await bot_player.stats_from_sql_full()
+        
+        # Assign random action and info
+        bot_player.status.action = random.choice(bot_actions)
+        
+        if bot_player.status.action == Action.Playing:
+            bot_player.status.info_text = "Playing ranked"
+            bot_player.status.mode = GameMode.VANILLA_OSU
+        elif bot_player.status.action == Action.Watching:
+            bot_player.status.info_text = "Watching replay"
+        elif bot_player.status.action == Action.Modding:
+            bot_player.status.info_text = "Modding beatmap"
+        elif bot_player.status.action == Action.Editing:
+            bot_player.status.info_text = "Editing beatmap"
+        elif bot_player.status.action == Action.Lobby:
+            bot_player.status.info_text = "In multiplayer lobby"
+        
+        # Add bot to online players
+        app.state.sessions.players.append(bot_player)
+        
+        if app.settings.DEBUG:
+            log(f"Loaded bot: {bot_user['name']} (ID: {bot_user['id']}, Country: {bot_user['country'].upper()})", Ansi.LGREEN)
+    
+    log(f"Loaded {len(bot_users)} simulation bots.", Ansi.LGREEN)
+
+
 async def _initialize_leaderboards() -> None:
     """Initialize leaderboards in redis from database statistics."""
     log("Initializing leaderboards in redis.", Ansi.LCYAN)
@@ -353,6 +429,7 @@ async def initialize_ram_caches() -> None:
         pw_bcrypt=None,
         token=Player.generate_token(),
         login_time=float(0x7FFFFFFF),  # (never auto-dc)
+        is_bot_client=True,
     )
     app.state.sessions.players.append(app.state.sessions.bot)
 
@@ -366,3 +443,6 @@ async def initialize_ram_caches() -> None:
 
     # initialize leaderboards in redis from database
     await _initialize_leaderboards()
+    
+    # load simulation bots for online count
+    await _load_simulation_bots()

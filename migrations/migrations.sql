@@ -475,3 +475,10 @@ create index users_country_index
 # v5.2.2
 create index scores_fetch_leaderboard_generic_index
 	on scores (map_md5, status, mode);
+
+# v5.2.3
+alter table daily_challenges
+drop foreign key daily_challenges_ibfk_1,
+add constraint daily_challenges_ibfk_1 
+foreign key (map_md5) references maps(md5)
+on update cascade;

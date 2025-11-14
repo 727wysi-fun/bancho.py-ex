@@ -14,6 +14,8 @@ from dataclasses import field
 from pathlib import Path
 from typing import Any
 from typing import TypeVar
+from datetime import datetime
+import jinja2
 
 import databases
 from akatsuki_pp_py import Beatmap
@@ -22,6 +24,8 @@ from redis import asyncio as aioredis
 
 sys.path.insert(0, os.path.abspath(os.pardir))
 os.chdir(os.path.abspath(os.pardir))
+
+from app.usecases.rx_performance import calculate_rx_performance
 
 try:
     import app.settings
@@ -48,6 +52,7 @@ class Context:
     database: databases.Database
     redis: aioredis.Redis
     beatmaps: dict[int, Beatmap] = field(default_factory=dict)
+    pp_changes: list[dict[str, Any]] = field(default_factory=list)  # Для хранения изменений PP
 
 
 def divide_chunks(values: list[T], n: int) -> Iterator[list[T]]:
@@ -76,9 +81,30 @@ async def recalculate_score(
             n50=score["n50"],
             n_misses=score["nmiss"],
         )
+        # Получаем max_combo карты из базы данных
+        map_info = await ctx.database.fetch_one(
+            "SELECT max_combo FROM maps WHERE id = :map_id",
+            {"map_id": score["map_id"]},
+        )
+        map_max_combo = map_info["max_combo"] if map_info else score["max_combo"]
+        
         attrs = calculator.performance(beatmap)
-
-        new_pp: float = attrs.pp
+        
+        new_pp: float
+        # Используем наш RX калькулятор для режима relax
+        if score["mode"] == 4:  # rx!std
+            new_pp = calculate_rx_performance(
+                base_pp=attrs.pp,
+                max_combo=score["max_combo"],
+                map_max_combo=map_max_combo,
+                stars=attrs.difficulty.stars,
+                aim_stars=attrs.difficulty.aim,
+                speed_stars=attrs.difficulty.speed,
+                nmiss=score["nmiss"],
+            )
+        else:
+            new_pp = attrs.pp
+            
         if math.isnan(new_pp) or math.isinf(new_pp):
             new_pp = 0.0
 
@@ -124,6 +150,13 @@ async def recalculate_user(
     game_mode: GameMode,
     ctx: Context,
 ) -> None:
+    # Получаем старое значение PP
+    old_stats = await ctx.database.fetch_one(
+        "SELECT pp, acc FROM stats WHERE id = :id AND mode = :mode",
+        {"id": id, "mode": game_mode},
+    )
+    old_pp = old_stats["pp"] if old_stats else 0
+
     best_scores = await ctx.database.fetch_all(
         "SELECT s.pp, s.acc FROM scores s "
         "INNER JOIN maps m ON s.map_md5 = m.md5 "
@@ -146,6 +179,25 @@ async def recalculate_user(
     weighted_pp = sum(row["pp"] * 0.95**i for i, row in enumerate(best_scores))
     bonus_pp = 416.6667 * (1 - 0.9994**total_scores)
     pp = round(weighted_pp + bonus_pp)
+
+    # Получаем имя пользователя
+    user_info = await ctx.database.fetch_one(
+        "SELECT name FROM users WHERE id = :id",
+        {"id": id},
+    )
+    username = user_info["name"] if user_info else f"User {id}"
+
+    # Сохраняем изменение PP для отчета
+    pp_change = {
+        "user_id": id,
+        "username": username,
+        "mode": game_mode.value,
+        "old_pp": old_pp,
+        "new_pp": pp,
+        "pp_change": pp - old_pp,
+        "pp_change_percent": ((pp - old_pp) / old_pp * 100) if old_pp > 0 else 0
+    }
+    ctx.pp_changes.append(pp_change)
 
     await ctx.database.execute(
         "UPDATE stats SET pp = :pp, acc = :acc WHERE id = :id AND mode = :mode",
@@ -217,6 +269,47 @@ async def recalculate_mode_scores(mode: GameMode, ctx: Context) -> None:
         await process_score_chunk(score_chunk, ctx)
 
 
+def generate_report(pp_changes: list[dict[str, Any]], mode: int) -> None:
+    """Генерирует HTML отчет с изменениями PP."""
+    # Подготовка статистики
+    filtered_changes = [c for c in pp_changes if c["mode"] == mode]
+    if not filtered_changes:
+        return
+
+    stats = {
+        "total_users": len(filtered_changes),
+        "avg_pp_change": sum(c["pp_change"] for c in filtered_changes) / len(filtered_changes),
+        "max_pp_gain": max(c["pp_change"] for c in filtered_changes),
+        "max_pp_loss": min(c["pp_change"] for c in filtered_changes),
+    }
+
+    # Сортировка по абсолютному значению изменения PP
+    filtered_changes.sort(key=lambda x: abs(x["pp_change"]), reverse=True)
+
+    # Загрузка шаблона и генерация отчета
+    template_loader = jinja2.FileSystemLoader("tools/templates")
+    template_env = jinja2.Environment(loader=template_loader)
+    template = template_env.get_template("pp_changes.html")
+
+    # Генерация HTML
+    output = template.render(
+        pp_changes=filtered_changes,
+        total_users=stats["total_users"],
+        avg_pp_change=f"{stats['avg_pp_change']:.2f}",
+        max_pp_gain=f"{stats['max_pp_gain']:.2f}",
+        max_pp_loss=f"{stats['max_pp_loss']:.2f}"
+    )
+
+    # Сохранение отчета
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = f"tools/reports/pp_changes_mode{mode}_{timestamp}.html"
+    os.makedirs("tools/reports", exist_ok=True)
+    
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(output)
+    
+    print(f"\nReport generated: {output_path}")
+
 async def main(argv: Sequence[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
 
@@ -238,6 +331,11 @@ async def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--no-stats",
         help="Disable recalculating user stats",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--no-report",
+        help="Disable generating HTML report",
         action="store_true",
     )
 
@@ -270,6 +368,11 @@ async def main(argv: Sequence[str] | None = None) -> int:
 
         if not args.no_stats:
             await recalculate_mode_users(mode, ctx)
+
+    # Генерация отчета для каждого режима
+    if not args.no_report:
+        for mode in map(int, args.mode):
+            generate_report(ctx.pp_changes, mode)
 
     await app.state.services.http_client.aclose()
     await db.disconnect()

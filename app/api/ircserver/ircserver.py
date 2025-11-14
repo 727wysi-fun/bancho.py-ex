@@ -519,14 +519,11 @@ class IRCClient:
 
             if message.startswith(app.settings.COMMAND_PREFIX):
                 cmd = await commands.process_commands(fro, recipient, message)
-            else:
-                cmd = None
+                if cmd:
+                    await recipient.send(message, sender=fro)
 
-            if cmd:
-                await recipient.send(message, sender=fro)
-
-                if cmd["resp"] is not None:
-                    await fro.send_bot(cmd["resp"])
+                    if cmd["resp"] is not None:
+                        await fro.send_bot(cmd["resp"])
             else:
                 await recipient.send(message, fro)
                 log(
@@ -534,8 +531,8 @@ class IRCClient:
                     Ansi.LCYAN,
                     file=".data/logs/chat.log",
                 )
- 
-        return 1
+
+            return 1
  
     @property
     def ip(self):

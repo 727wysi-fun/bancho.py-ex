@@ -150,15 +150,21 @@ async def api_calculate_pp(
 async def api_online() -> Response:
     """Shows online players."""
     players = []
+    bots = []
     
     for p in app.state.sessions.players:
         player_info = {"id": p.id, "name": p.name}
-        players.append(player_info)
+        
+        if p.is_bot_client:
+            bots.append(player_info)
+        else:
+            players.append(player_info)
 
     return ORJSONResponse(
         {
             "status": "success",
             "players": players,
+            "bots": bots,
         }
     )
 
